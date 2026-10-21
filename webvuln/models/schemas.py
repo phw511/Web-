@@ -30,6 +30,7 @@ class Role(str, Enum):
 
 class VulnType(str, Enum):
     SQLI = "sqli"
+    XSS = "xss"
     LFI = "lfi"
     IDOR = "idor"
     CONFIG = "config"
