@@ -1,0 +1,59 @@
+{
+  "scan": {
+    "id": "scan-772f5e120258",
+    "target_id": "tgt-8654aad61656",
+    "status": "finished",
+    "started_by": "sim-submitter",
+    "started_at": "2026-10-21T03:27:42.493532+00:00",
+    "finished_at": "2026-10-21T03:27:42.949354+00:00"
+  },
+  "target": {
+    "id": "tgt-8654aad61656",
+    "url": "http://127.0.0.1:8080"
+  },
+  "findings": [
+    {
+      "id": "cand-6c1acb61deaa",
+      "scan_id": "scan-772f5e120258",
+      "target_id": "tgt-8654aad61656",
+      "vuln_type": "sqli",
+      "endpoint": "http://127.0.0.1:8080",
+      "parameter": "q",
+      "claim": "参数「q」注入探测异常：错误型信号：响应包含数据库错误特征，摘录「Query failed: mysql syntax error near '' at line 1」；布尔型信号：恒真/恒假条件响应长度 600/0 字节，基线 41 字节，差异率超阈值 20%",
+      "detector": "sqli_error_boolean_v1",
+      "created_at": "2026-10-21T03:27:42.526249+00:00",
+      "function_name": "sqli_boolean_probe",
+      "decision_source": "rule",
+      "risk_level": "low",
+      "state": "CONFIRMED",
+      "evidence_level": "Reproduced",
+      "signed_by": null,
+      "signed_at": null
+    },
+    {
+      "id": "cand-9bfa290aeb38",
+      "scan_id": "scan-772f5e120258",
+      "target_id": "tgt-8654aad61656",
+      "vuln_type": "xss",
+      "endpoint": "http://127.0.0.1:8080",
+      "parameter": "q",
+      "claim": "参数「q」反射探测命中：金丝雀「wvxss7k<svg>」未转义原样出现在响应体中，出现位置上下文「<div>Your input was echoed: wvxss7k<svg></div>」",
+      "detector": "xss_reflected_v1",
+      "created_at": "2026-10-21T03:27:42.526436+00:00",
+      "function_name": "xss_reflected_probe",
+      "decision_source": "rule",
+      "risk_level": "low",
+      "state": "CONFIRMED",
+      "evidence_level": "Reproduced",
+      "signed_by": null,
+      "signed_at": null
+    }
+  ],
+  "metrics": {
+    "TP": 2,
+    "FP": 0,
+    "INCONCLUSIVE": 0,
+    "PENDING": 0,
+    "FN": null
+  }
+}
