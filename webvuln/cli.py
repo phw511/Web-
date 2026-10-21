@@ -8,11 +8,13 @@
   python -m webvuln.cli replay --scan <scan_id>
   python -m webvuln.cli report --scan <scan_id> --format md
   python -m webvuln.cli verify-evidence
+  python -m webvuln.cli sim-demo --out <dir>   # 离线模拟 + 可视化/文本导出
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 
 from webvuln.config import load_settings
 from webvuln.container import Container
@@ -39,6 +41,10 @@ def main() -> None:
     rt.add_argument("--format", default="md", choices=["json", "md", "html"])
     sub.add_parser("verify-evidence")
 
+    sim = sub.add_parser("sim-demo")
+    sim.add_argument("--out", default="./sim_out",
+                     help="输出目录（写入 report.html/txt/md/json）")
+
     args = parser.parse_args()
     c = Container(load_settings())
 
@@ -58,6 +64,13 @@ def main() -> None:
         print(c.reporter.render(args.scan, args.format))
     elif args.cmd == "verify-evidence":
         print(json.dumps(c.evidence.manifest(), ensure_ascii=False, indent=2))
+    elif args.cmd == "sim-demo":
+        from webvuln.sim.runner import run_simulation
+        res = run_simulation(os.path.abspath(args.out))
+        print(json.dumps({
+            "scan_id": res["scan_id"], "target_id": res["target_id"],
+            "metrics": res["metrics"], "outputs": res["outputs"],
+        }, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
