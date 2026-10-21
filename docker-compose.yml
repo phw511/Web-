@@ -1,0 +1,14 @@
+services:
+  backend:
+    build: { context: ., dockerfile: Dockerfile.backend }
+    ports: ["8000:8000"]
+    volumes: ["./data:/data"]
+    environment: [WEBVULN_JWT_SECRET=please-change-me]
+  frontend:
+    build: { context: ., dockerfile: Dockerfile.frontend }
+    ports: ["8080:80"]
+    depends_on: [backend]
+  dvwa:    # 靶场：docker compose --profile lab up
+    image: vulnerables/web-dvwa
+    profiles: ["lab"]
+    ports: ["8081:80"]
