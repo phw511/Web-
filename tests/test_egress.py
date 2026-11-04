@@ -11,8 +11,13 @@ def test_unregistered_target_zero_packets(container):
     assert container.transport.requests == []  # 未发包即拦截
 
 
-def test_out_of_scope_path_blocked(container, approved_target):
-    spec = HttpSpec(url=approved_target.url + "/admin", params={"q": "1"})
+def test_out_of_scope_path_blocked(container):
+    # 根 scope "/" 在本设计中表示整站放行（扫描依赖它），
+    # 故用窄 scope 演示"越范围路径拦截"：只授权 /search，请求 /admin 应被拦。
+    reg = container.authorizer.submit_target(
+        "sub1", "http://vuln.example.com", ["/search"], {"q": "1"}, "窄范围靶场")
+    container.authorizer.approve_target("app1", reg.id, "仅授权 /search")
+    spec = HttpSpec(url=reg.url + "/admin", params={"q": "1"})
     with pytest.raises(EgressDenied):
         container.gateway.send(spec)
 
