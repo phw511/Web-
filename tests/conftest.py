@@ -14,6 +14,30 @@ from webvuln.contracts.transport import Transport
 from webvuln.models.schemas import ResponseSnapshot, Role
 
 
+# 离线/无 DNS 环境的测试域名解析兜底：
+# 测试用 *.example.com 等假域名注册目标，approve_target 与 EgressGateway.check()
+# 会先 getaddrinfo 解析以判断公网/私网。真实环境有 DNS，离线沙箱没有。
+# 该 autouse 夹具把解析失败的域名统一映射到公网地址（非私网、非回环），
+# 使测试不依赖真实 DNS 也可稳定运行（扫描本身用 FakeVulnTransport，不触网）。
+_OFFLINE_PUBLIC_IP = "93.184.216.34"  # example.com 的真实公网地址
+
+
+@pytest.fixture(autouse=True)
+def _offline_dns(monkeypatch):
+    import socket
+
+    _orig_getaddrinfo = socket.getaddrinfo
+
+    def _patched_getaddrinfo(host, *args, **kwargs):
+        try:
+            return _orig_getaddrinfo(host, *args, **kwargs)
+        except socket.gaierror:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                     (_OFFLINE_PUBLIC_IP, 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _patched_getaddrinfo)
+
+
 class FakeVulnTransport(Transport):
     """模拟带 SQLi 布尔差异的易受攻击端点。
 
