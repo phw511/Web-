@@ -15,6 +15,7 @@ from webvuln.contracts.attack import default_registry
 from webvuln.contracts.transport import Transport
 from webvuln.db.database import Database
 from webvuln.detector.engine import DetectorEngine
+from webvuln.detector.lfi import LFIDetector
 from webvuln.detector.sqli import SQLiDetector
 from webvuln.detector.xss import XSSDetector
 from webvuln.evidence.store import FileEvidenceStore
@@ -55,7 +56,7 @@ class Container:
         self.gateway = EgressGateway(self.db, self.transport)
         self.authorizer = AuthorizerService(self.db)
         self.registry = default_registry()
-        self.engine = DetectorEngine(self.gateway, [SQLiDetector(), XSSDetector()])
+        self.engine = DetectorEngine(self.gateway, [SQLiDetector(), XSSDetector(), LFIDetector()])
         self.agent = RuleAgent()
         self.executor = AttackExecutor(self.registry, self.gateway, self.evidence)
         self.reporter = ReporterService(self.db)
