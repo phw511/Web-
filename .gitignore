@@ -1,8 +1,0 @@
-__pycache__/
-*.pyc
-.venv/
-data/
-evidence/
-node_modules/
-dist/
-.env
