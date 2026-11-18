@@ -4,6 +4,8 @@
 响应出现 root:x:0:0 口令文件特征行即判定命中。
 只读 GET，但主动读取服务器文件系统，影响面大于布尔/反射探测，
 故归中危：run_scan 不自动执行，产出审批单等待人工批准/否决。
+
+v0.2.0：出站改走 `gateway.send_attack()`。
 """
 from __future__ import annotations
 
@@ -34,7 +36,7 @@ class LFITraversalProbe(AttackFunction):
             "params": {**base.params,
                        candidate.parameter: base.params.get(candidate.parameter, "") + TRAVERSAL_PAYLOAD}
         })
-        resp = gateway.send(spec)
+        resp = gateway.send_attack(spec)
         idx = resp.body.find(OS_INDICATOR)
         matched = idx >= 0
         if matched:

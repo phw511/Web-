@@ -2,6 +2,9 @@
 
 验证逻辑：对候选参数分别附加恒真/恒假条件各发一次只读请求，
 响应体长度差显著即判定命中（与检测器信号口径一致，可机器断言）。
+
+v0.2.0：出站改走 `gateway.send_attack()`——攻击流量在唯一出口打标记并计数，
+不再与检测探测混在一起。
 """
 from __future__ import annotations
 
@@ -36,8 +39,8 @@ class SQLiBooleanProbe(AttackFunction):
         spec_false = base.model_copy(update={
             "params": {**base.params, candidate.parameter: base.params.get(candidate.parameter, "") + self.FALSE_COND}
         })
-        resp_true = gateway.send(spec_true)
-        resp_false = gateway.send(spec_false)
+        resp_true = gateway.send_attack(spec_true)
+        resp_false = gateway.send_attack(spec_false)
         bigger = max(len(resp_true.body), len(resp_false.body), 1)
         matched = abs(len(resp_true.body) - len(resp_false.body)) / bigger > DIFF_THRESHOLD
         return AttackResult(

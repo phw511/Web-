@@ -18,18 +18,5 @@ def report(scan_id: str, format: str = "md",
 
 @router.get("/stats")
 def stats(user: dict = Depends(get_current_user), c: Container = Depends(get_container)):
-    by_state = c.db.query(
-        "SELECT state, COUNT(*) AS n FROM conclusions GROUP BY state")
-    by_vuln = c.db.query(
-        "SELECT c.vuln_type, con.state, COUNT(*) AS n FROM conclusions con"
-        " JOIN candidates c ON c.id=con.candidate_id GROUP BY c.vuln_type, con.state")
-    totals = {r["state"]: r["n"] for r in by_state}
-    return {
-        "TP": totals.get("CONFIRMED", 0),
-        "FP": totals.get("REJECTED", 0),
-        "INCONCLUSIVE": totals.get("INCONCLUSIVE", 0),
-        "PENDING": c.db.one("SELECT COUNT(*) AS n FROM conclusions"
-                            " WHERE state IN ('CANDIDATE','ATTACKED')")["n"],
-        "FN": None,  # 需靶场真值集后统计（计划书 5.1）
-        "by_vuln_type": by_vuln,
-    }
+    """全局指标：实现只有 reporter.metrics_global 一份（口径与报告页一致）。"""
+    return c.reporter.metrics_global()

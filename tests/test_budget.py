@@ -2,6 +2,10 @@
 
 章节03口径：验收项必须有"执行与判定办法 + 真实结果"，只在 config
 声明数值而不设强制点，属于"检查办法存在但从未执行 = 未运行"。
+
+注意（v0.2.0）：本文件此前建账号用的密码是 "a1"/"s1"/"p1"/"g1"，
+不足 `UserService` 要求的 6 位，导致必然 ValueError——四个用例根本跑不到断言。
+本次只修这两个字的 bug，断言与判定口径一字未改。
 """
 import pytest
 
@@ -35,8 +39,10 @@ def _make_container(tmp_path, **over):
     c = Container(settings)
     c.transport = ComboTransport()
     c.gateway.transport = c.transport
-    for u, p, r in [("admin", "a1", Role.ADMIN), ("sub1", "s1", Role.SUBMITTER),
-                    ("app1", "p1", Role.APPROVER), ("sig1", "g1", Role.SIGNER)]:
+    for u, p, r in [("admin", "admin123", Role.ADMIN),
+                    ("sub1", "subpass1", Role.SUBMITTER),
+                    ("app1", "apppass1", Role.APPROVER),
+                    ("sig1", "sigpass1", Role.SIGNER)]:
         c.users.create(u, p, r)
     reg = c.authorizer.submit_target(
         "sub1", "http://vuln.example.com", ["/"], {"q": "book"}, "构造靶场")
@@ -48,7 +54,8 @@ def test_scan_time_budget_stops_scan(tmp_path):
     c, target = _make_container(tmp_path, scan_timeout_seconds=0)
     result = c.pipeline.run_scan(target.id, "sub1")
     assert "预算" in result["budget_stopped"] and "时长" in result["budget_stopped"]
-    assert c.db.one("SELECT status FROM scans WHERE id=?", (result["scan_id"],))["status"]         == "stopped_budget"
+    assert c.db.one("SELECT status FROM scans WHERE id=?", (result["scan_id"],))["status"] \
+        == "stopped_budget"
     kinds = [r.kind for r in c.evidence.for_scan(result["scan_id"])]
     assert "budget_exceeded" in kinds          # 超限已写入证据层
     assert c.evidence.verify_scan(result["scan_id"]) is True
@@ -61,7 +68,8 @@ def test_decision_round_budget_stops_partial(tmp_path):
     assert result["candidates"] == 2
     assert result["auto_executed"] == 1        # 已处理部分保留，如实标注
     assert "轮次" in result["budget_stopped"]
-    assert c.db.one("SELECT status FROM scans WHERE id=?", (result["scan_id"],))["status"]         == "stopped_budget"
+    assert c.db.one("SELECT status FROM scans WHERE id=?", (result["scan_id"],))["status"] \
+        == "stopped_budget"
 
 
 def test_attack_request_cap_blocks_at_gateway(tmp_path):

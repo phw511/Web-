@@ -16,10 +16,11 @@
         <td>{{ t.url }}</td><td>{{ t.status }}</td><td>{{ t.submitted_by }}</td>
         <td>{{ (t.expires_at || '').slice(0, 10) }}</td>
         <td>
-          <template v-if="t.status === 'pending' && role !== 'submitter'">
+          <template v-if="t.status === 'pending' && canApprove">
             <button @click="approve(t.id)">批准</button>
             <button style="background:#dc2626" @click="reject(t.id)">拒绝</button>
           </template>
+          <span v-else-if="t.status === 'pending'" style="color:#94a3b8">等待审批人处理</span>
         </td>
       </tr></table>
     </div>
@@ -28,7 +29,9 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
 import { req, post } from '../api'
+// 只有 approver/admin 才显示审批按钮（后端仍会二次校验，这里只是别让人白点）
 const role = computed(() => localStorage.getItem('role'))
+const canApprove = computed(() => ['approver', 'admin'].includes(role.value))
 const targets = ref([]), err = ref('')
 const form = ref({ url: '', scope_paths: '/', q: '', justification: '', allow_private: false })
 async function load() { targets.value = await req('/targets') }
@@ -36,7 +39,7 @@ async function submit() {
   err.value = ''
   try {
     await post('/targets', { url: form.value.url,
-      scope_paths: form.value.scope_paths.split(','),
+      scope_paths: form.value.scope_paths.split(',').map(s => s.trim()).filter(Boolean),
       base_params: form.value.q ? { q: form.value.q } : {},
       justification: form.value.justification,
       allow_private: form.value.allow_private })
@@ -44,7 +47,15 @@ async function submit() {
   } catch (e) { err.value = e.message }
 }
 const reason = () => prompt('审批理由：') || ''
-async function approve(id) { await post(`/targets/${id}/approve`, { reason: reason() }); load() }
-async function reject(id) { await post(`/targets/${id}/reject`, { reason: reason() }); load() }
+async function approve(id) {
+  const r = reason()
+  if (!r.trim()) { err.value = '审批必须填写理由'; return }
+  try { await post(`/targets/${id}/approve`, { reason: r }); load() } catch (e) { err.value = e.message }
+}
+async function reject(id) {
+  const r = reason()
+  if (!r.trim()) { err.value = '审批必须填写理由'; return }
+  try { await post(`/targets/${id}/reject`, { reason: r }); load() } catch (e) { err.value = e.message }
+}
 onMounted(load)
 </script>

@@ -3,6 +3,12 @@
 hash_i = SHA-256(prev_hash || canonical_json(record_i))，后一条包含前一条哈希，
 任何篡改在 verify() 重放时暴露。SQLite evidence_index 表提供查询索引。
 原始请求/响应的加密存储为后续增强点（计划书 5.4），本版先落盘+留痕。
+
+v0.2.0：
+- 每条记录写入运行身份 `app_version`（计划书 5.2"能关联"）；
+- `manifest()` 扩为逐条机器可读索引（计划书第 10 章评价方审查入口）；
+- `verify_scan()` 去掉内层重复全量读取（原实现 O(n²)）。
+- 兼容性：哈希计算对空 app_version 做排除，旧证据链升级后仍能通过校验。
 """
 from __future__ import annotations
 
@@ -15,6 +21,7 @@ from webvuln.db.database import Database
 from webvuln.models.schemas import EvidenceRecord, now_iso, uid
 
 GENESIS = "GENESIS"
+DEFAULT_APP_VERSION = "0.2.0"
 
 
 def canonical(obj: dict) -> str:
@@ -25,12 +32,21 @@ def compute_hash(prev_hash: str, record: dict) -> str:
     return hashlib.sha256((prev_hash + "|" + canonical(record)).encode("utf-8")).hexdigest()
 
 
+def _body(record: EvidenceRecord) -> dict:
+    """参与哈希的正文：空 app_version 不入链（兼容 0.1.x 写入的旧记录）。"""
+    body = record.model_dump(exclude={"hash"})
+    if not body.get("app_version"):
+        body.pop("app_version", None)
+    return body
+
+
 class FileEvidenceStore(EvidenceStore):
-    def __init__(self, root: str, db: Database):
+    def __init__(self, root: str, db: Database, app_version: str = DEFAULT_APP_VERSION):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.chain_path = self.root / "chain.jsonl"
         self.db = db
+        self.app_version = app_version
         self._last_hash = self._read_head()
 
     def _read_head(self) -> str:
@@ -48,8 +64,9 @@ class FileEvidenceStore(EvidenceStore):
         rec = EvidenceRecord(
             id=uid("ev"), scan_id=scan_id, kind=kind, payload=payload,
             prev_hash=self._last_hash, created_at=now_iso(),
+            app_version=self.app_version,
         )
-        body = rec.model_dump(exclude={"hash"})
+        body = _body(rec)
         rec.hash = compute_hash(rec.prev_hash, body)
         with open(self.chain_path, "a", encoding="utf-8") as f:
             f.write(canonical({**body, "hash": rec.hash}) + "\n")
@@ -84,10 +101,9 @@ class FileEvidenceStore(EvidenceStore):
     def verify(self) -> bool:
         prev = GENESIS
         for rec in self._iter_records():
-            body = rec.model_dump(exclude={"hash"})
             if rec.prev_hash != prev:
                 return False
-            if compute_hash(prev, body) != rec.hash:
+            if compute_hash(prev, _body(rec)) != rec.hash:
                 return False
             prev = rec.hash
         return True
@@ -95,24 +111,50 @@ class FileEvidenceStore(EvidenceStore):
     def verify_scan(self, scan_id: str) -> bool:
         if not self.verify():
             return False
-        records = self.for_scan(scan_id)
-        # 子链完整性：首条 prev_hash 必须指向链上真实存在的前驱
+        records = self._iter_records()
         if not records:
             return False
-        known = {r.id for r in self._iter_records()}
-        for rec in records:
-            if rec.prev_hash == GENESIS:
-                continue
-            if not any(
-                r.hash == rec.prev_hash and r.id in known for r in self._iter_records()
-            ):
-                return False
-        return True
+        sub = [r for r in records if r.scan_id == scan_id]
+        if not sub:
+            return False
+        # 子链完整性：首条可指向 GENESIS，其余必须指向链上真实存在的前驱
+        known = {r.hash for r in records}
+        return all(r.prev_hash == GENESIS or r.prev_hash in known for r in sub)
+
+    # ---- 机器可读索引（计划书 10 章：评价方审查入口） ----
+    def _conclusion_map(self) -> dict[str, list[str]]:
+        mapping: dict[str, list[str]] = {}
+        for row in self.db.query("SELECT id, candidate_id FROM conclusions"):
+            mapping.setdefault(row["candidate_id"], []).append(row["id"])
+        return mapping
 
     def manifest(self) -> dict:
         records = self._iter_records()
+        by_candidate = self._conclusion_map()
+        entries = []
+        for rec in records:
+            payload = rec.payload or {}
+            conclusion_ids: list[str] = []
+            candidate_id = payload.get("candidate_id")
+            if candidate_id:
+                conclusion_ids.extend(by_candidate.get(candidate_id, []))
+            if payload.get("conclusion_id"):
+                conclusion_ids.append(payload["conclusion_id"])
+            entries.append({
+                "id": rec.id,
+                "kind": rec.kind,
+                "scan_id": rec.scan_id,
+                "hash": rec.hash,
+                "prev_hash": rec.prev_hash,
+                "created_at": rec.created_at,
+                "app_version": rec.app_version,
+                "conclusion_ids": conclusion_ids,
+                "signature": None,   # 预留位：签署密钥签名为增强项（计划书 5.2）
+            })
         return {
+            "app_version": self.app_version,
             "head_hash": self._last_hash,
             "record_count": len(records),
             "verified": self.verify(),
+            "records": entries,
         }

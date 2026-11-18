@@ -5,12 +5,13 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from webvuln.contracts.authz import AuthorizationError, Authorizer
+from webvuln.contracts.authz import ApprovalForbidden, AuthorizationError, Authorizer
 from webvuln.authz import egress as egress_mod
 from webvuln.authz.egress import EgressGateway, is_restricted_ip
 from webvuln.db.database import Database
 from webvuln.models.schemas import (
-    ApprovalKind, ApprovalRecord, TargetRegistration, TargetStatus, now_iso, uid,
+    ApprovalKind, ApprovalRecord, RiskLevel, Role, TargetRegistration, TargetStatus,
+    now_iso, uid,
 )
 
 APPROVAL_VALIDITY_DAYS = 30
@@ -133,3 +134,24 @@ class AuthorizerService(Authorizer):
             (decision_id,),
         )
         return row is not None
+
+    # ---- 分级放行的唯一判定处（计划书 4.1） ----
+    def assert_approval_allowed(self, actor_role: str, risk_level: str) -> None:
+        """中危→approver、高危→signer；admin 兜底。低危由 Agent 自动放行，不经此处。
+
+        此前该规则只写在 Web 路由里（HTTP 层），`Pipeline.execute_approved`
+        可被 CLI/内部调用绕过。规则下沉到授权层后，路由只负责把异常映射成 403。
+        """
+        if actor_role == Role.ADMIN.value:
+            return
+        if risk_level == RiskLevel.MEDIUM.value:
+            needed = Role.APPROVER
+        elif risk_level == RiskLevel.HIGH.value:
+            needed = Role.SIGNER
+        else:
+            # 低危不该走到人工审批；出现即说明调用方逻辑有误，明确拒绝而不是静默放行
+            raise ApprovalForbidden(
+                f"风险级别 {risk_level!r} 不属于人工审批范围（低危由 Agent 自动放行）"
+            )
+        if actor_role != needed.value:
+            raise ApprovalForbidden(f"{risk_level} 风险需 {needed.value} 角色审批（当前 {actor_role}）")

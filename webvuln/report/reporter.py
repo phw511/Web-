@@ -2,6 +2,10 @@
 
 指标口径：TP=CONFIRMED 数，FP=REJECTED 数，INCONCLUSIVE 单列，
 FN 需靶场真值集（M2 部署 DVWA 后统计），本版在报告中如实标注口径。
+
+v0.2.0：`metrics_global()` 成为全局指标的唯一实现，`/api/stats` 只做转发。
+此前路由自己写 SQL，`PENDING` 数的是 conclusions 表里永不出现的
+CANDIDATE/ATTACKED，结果恒为 0，与报告层口径打架。
 """
 from __future__ import annotations
 
@@ -46,6 +50,24 @@ class ReporterService(Reporter):
                 "PENDING": state_counts.get("PENDING", 0),
                 "FN": None,  # 需靶场真值集，如实标注（计划书 5.1）
             },
+        }
+
+    def metrics_global(self) -> dict:
+        """全局指标。PENDING = 已产出候选但尚无结论（与 summary 同口径）。"""
+        counts = {r["state"]: r["n"] for r in self.db.query(
+            "SELECT state, COUNT(*) AS n FROM conclusions GROUP BY state")}
+        total_candidates = self.db.one("SELECT COUNT(*) AS n FROM candidates")["n"]
+        decided = self.db.one("SELECT COUNT(*) AS n FROM conclusions")["n"]
+        by_vuln = self.db.query(
+            "SELECT c.vuln_type, con.state, COUNT(*) AS n FROM conclusions con"
+            " JOIN candidates c ON c.id=con.candidate_id GROUP BY c.vuln_type, con.state")
+        return {
+            "TP": counts.get("CONFIRMED", 0),
+            "FP": counts.get("REJECTED", 0),
+            "INCONCLUSIVE": counts.get("INCONCLUSIVE", 0),
+            "PENDING": max(total_candidates - decided, 0),
+            "FN": None,  # 需靶场真值集后统计（计划书 5.1）
+            "by_vuln_type": by_vuln,
         }
 
     def render(self, scan_id: str, fmt: str) -> str:

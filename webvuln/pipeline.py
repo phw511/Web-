@@ -3,14 +3,27 @@
 - 低危函数：Agent 自动放行执行（证据链记录 system(auto) 审批）；
 - 中高危函数：产出审批单，人工在界面批准后由 execute_approved 续跑；
 - 每步证据留痕：scan_start / decision / approval / attack_* / state_change / sign。
+
+v0.2.0（计划书 2.3 预算约束 + 9 章四项上限）：
+- 时长与决策轮次在本层强制：超限即停，扫描状态 `stopped_budget` 并写
+  `budget_exceeded` 证据；攻击请求数与并发由出口/执行器各自强制（见 egress、executor），
+  本层只负责把"攻击请求超限"这类异常如实上抛给调用方（不能吞，否则"超限即停"变静默）；
+- Agent 找不到匹配白名单函数（AgentDecisionError）时，候选挂起并留痕，
+  不再让整次扫描崩掉——这正是"新增检测器但尚未新增攻击函数"的正常过渡态；
+- 任何未预期异常都把扫描标记 `failed` 并留痕，避免"永远 running"的僵尸扫描；
+- 人工审批的角色判定下沉到授权层（authorizer.assert_approval_allowed），本层只透传角色。
 """
 from __future__ import annotations
 
 import json
+from typing import Optional
 
-from webvuln.contracts.agent import DecisionAgent
+from webvuln.contracts.agent import AgentDecisionError, DecisionAgent
 from webvuln.contracts.attack import AttackRegistry
 from webvuln.contracts.authz import AuthorizationError, Authorizer
+from webvuln.contracts.budget import (
+    KIND_ROUNDS, KIND_TIME, BudgetExceeded, BudgetGuardContract,
+)
 from webvuln.contracts.evidence import EvidenceStore
 from webvuln.db.database import Database
 from webvuln.detector.engine import DetectorEngine
@@ -20,12 +33,17 @@ from webvuln.models.schemas import (
     HttpSpec, RiskLevel, TargetRegistration, now_iso, uid,
 )
 
+STATUS_RUNNING = "running"
+STATUS_FINISHED = "finished"
+STATUS_STOPPED_BUDGET = "stopped_budget"
+STATUS_FAILED = "failed"
+
 
 class Pipeline:
     def __init__(
         self, db: Database, authorizer: Authorizer, engine: DetectorEngine,
         agent: DecisionAgent, executor: AttackExecutor, evidence: EvidenceStore,
-        registry: AttackRegistry,
+        registry: AttackRegistry, budget: Optional[BudgetGuardContract] = None,
     ):
         self.db = db
         self.authorizer = authorizer
@@ -34,62 +52,108 @@ class Pipeline:
         self.executor = executor
         self.evidence = evidence
         self.registry = registry
+        self.budget = budget
 
     # ---- 扫描主流程 ----
     def run_scan(self, target_id: str, username: str) -> dict:
         target = self.authorizer.get_target(target_id)
         if target is None or target.status.value != "approved":
             raise AuthorizationError("目标不存在或未获批")
+
         scan_id = uid("scan")
+        if self.budget is not None:
+            self.budget.start_scan(scan_id, target.url)
         self.db.execute(
             "INSERT INTO scans(id,target_id,status,started_by,started_at)"
             " VALUES(?,?,?,?,?)",
-            (scan_id, target_id, "running", username, now_iso()),
+            (scan_id, target_id, STATUS_RUNNING, username, now_iso()),
         )
         self.evidence.append(scan_id, "scan_start", {
             "target_id": target_id, "url": target.url, "by": username,
         })
-        candidates = self.engine.run(target, scan_id)
-        executed, pending = 0, 0
-        for cand in candidates:
-            self._save_candidate(cand)
-            decision = self.agent.decide(cand, self.registry)
-            self._save_decision(decision)
-            self.evidence.append(scan_id, "decision", decision.model_dump())
-            meta = self.registry.get(decision.function_name).meta
-            if meta.risk_level == RiskLevel.LOW:
-                self.evidence.append(scan_id, "approval", {
-                    "decision_id": decision.id, "action": "approve",
-                    "actor": "system(auto)",
-                    "reason": "低危函数按可逆性分级自动放行（计划书 4.1）",
+
+        candidates_count = 0
+        executed = pending = suspended = 0
+        try:
+            self._check_time("检测启动")
+            candidates = self.engine.run(target, scan_id)
+            candidates_count = len(candidates)
+
+            for cand in candidates:
+                self._check_time("逐个候选决策前")
+                self._check_round()          # 轮次上限：超限即停，已处理部分保留
+                self._save_candidate(cand)
+                try:
+                    decision = self.agent.decide(cand, self.registry)
+                except AgentDecisionError as e:
+                    suspended += 1
+                    self.evidence.append(scan_id, "candidate_suspended", {
+                        "candidate_id": cand.id, "vuln_type": cand.vuln_type.value,
+                        "reason": str(e),
+                    })
+                    continue
+
+                self._save_decision(decision)
+                self.evidence.append(scan_id, "decision", decision.model_dump())
+                meta = self.registry.get(decision.function_name).meta
+                if meta.risk_level == RiskLevel.LOW:
+                    self.evidence.append(scan_id, "approval", {
+                        "decision_id": decision.id, "action": "approve",
+                        "actor": "system(auto)",
+                        "reason": "低危函数按可逆性分级自动放行（计划书 4.1）",
+                    })
+                    self._execute_and_conclude(scan_id, target, cand, decision)
+                    executed += 1
+                else:
+                    self.evidence.append(scan_id, "pending_approval", {
+                        "decision_id": decision.id,
+                        "risk_level": meta.risk_level.value,
+                    })
+                    pending += 1
+
+        except BudgetExceeded as e:
+            if e.kind in (KIND_TIME, KIND_ROUNDS):
+                # 编排层可控的两项：停止扫描，如实留痕，不抛给调用方
+                self._set_status(scan_id, STATUS_STOPPED_BUDGET)
+                self.evidence.append(scan_id, "budget_exceeded", {
+                    "kind": e.kind, "limit": e.limit, "reason": str(e),
+                    "budget": self.budget.snapshot() if self.budget else {},
                 })
-                self._execute_and_conclude(scan_id, target, cand, decision)
-                executed += 1
-            else:
-                self.evidence.append(scan_id, "pending_approval", {
-                    "decision_id": decision.id,
-                    "risk_level": meta.risk_level.value,
-                })
-                pending += 1
-        self.db.execute(
-            "UPDATE scans SET status=?, finished_at=? WHERE id=?",
-            ("finished", now_iso(), scan_id),
-        )
-        return {"scan_id": scan_id, "candidates": len(candidates),
-                "auto_executed": executed, "pending_approval": pending}
+                return self._result(scan_id, candidates_count, executed, pending,
+                                    suspended, str(e), STATUS_STOPPED_BUDGET)
+            # 请求数/并发：属于"某条攻击被出口/执行器拦下"，必须上抛，不能静默
+            self._set_status(scan_id, STATUS_FAILED)
+            self.evidence.append(scan_id, "budget_exceeded", {
+                "kind": e.kind, "limit": e.limit, "reason": str(e),
+                "budget": self.budget.snapshot() if self.budget else {},
+            })
+            raise
+        except Exception as e:
+            self._set_status(scan_id, STATUS_FAILED)
+            self.evidence.append(scan_id, "scan_failed", {
+                "error": f"{type(e).__name__}: {e}",
+            })
+            raise
+
+        self._set_status(scan_id, STATUS_FINISHED)
+        return self._result(scan_id, candidates_count, executed, pending,
+                            suspended, "", STATUS_FINISHED)
 
     # ---- 人工审批后续跑（中高危） ----
     def execute_approved(self, actor: str, decision_id: str, action: str,
-                         reason: str) -> Conclusion:
+                         reason: str, actor_role: Optional[str] = None) -> Conclusion:
         decision = self._get_decision(decision_id)
         cand = self._candidate_row(decision["candidate_id"])
         scan = self.db.one("SELECT * FROM scans WHERE id=?", (cand["scan_id"],))
         target = self.authorizer.get_target(scan["target_id"])
+        # 分级放行的判定只在授权层一份；此处只透传角色（不传则视为内部调用，不做角色约束）
+        if actor_role is not None:
+            self.authorizer.assert_approval_allowed(actor_role, decision["risk_level"])
         approval = self.authorizer.record_attack_approval(actor, decision_id, action, reason)
         self.evidence.append(cand["scan_id"], "approval", approval.model_dump())
         if action == "reject":
             return self._conclude(cand, CandidateState.INCONCLUSIVE,
-                                  EvidenceLevel.CLAIM,
+                                  EvidenceLevel.OBSERVED,
                                   decided_by=f"human-reject:{actor}",
                                   note="人工否决攻击验证，结论如实标注证据不足")
         return self._execute_and_conclude(cand["scan_id"], target, cand,
@@ -110,7 +174,7 @@ class Pipeline:
             "UPDATE conclusions SET signed_by=?, signed_at=?, signature_note=? WHERE id=?",
             (actor, now_iso(), note, conclusion_id),
         )
-        self.evidence.append(row["scan_id"] if "scan_id" in row else self._scan_of(row["candidate_id"]),
+        self.evidence.append(self._scan_of(row["candidate_id"]),
                              "sign", {
                                  "conclusion_id": conclusion_id, "signer": actor,
                                  "note": note,
@@ -125,8 +189,37 @@ class Pipeline:
             "record_count": len(records),
             "timeline": [
                 {"kind": r.kind, "id": r.id, "hash": r.hash,
-                 "created_at": r.created_at} for r in records
+                 "created_at": r.created_at, "app_version": r.app_version}
+                for r in records
             ],
+        }
+
+    # ---- 内部：预算与状态 ----
+    def _check_time(self, phase: str) -> None:
+        if self.budget is not None:
+            self.budget.check_time(phase)
+
+    def _check_round(self) -> None:
+        if self.budget is not None:
+            self.budget.check_round()
+
+    def _set_status(self, scan_id: str, status: str) -> None:
+        self.db.execute(
+            "UPDATE scans SET status=?, finished_at=? WHERE id=?",
+            (status, now_iso(), scan_id),
+        )
+
+    @staticmethod
+    def _result(scan_id: str, candidates: int, executed: int, pending: int,
+                suspended: int, stopped: str, status: str) -> dict:
+        return {
+            "scan_id": scan_id,
+            "candidates": candidates,
+            "auto_executed": executed,
+            "pending_approval": pending,
+            "suspended": suspended,
+            "budget_stopped": stopped,      # 未触发时为空串，调用方无需做 key 判断
+            "status": status,
         }
 
     # ---- 内部 ----

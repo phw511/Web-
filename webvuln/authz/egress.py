@@ -3,6 +3,9 @@
 所有出站 HTTP 必须经此类：未注册目标、授权过期、超范围路径、
 内网/保留地址（SSRF 防护）在未发包前即抛 EgressDenied。
 检测器与攻击函数只构造 HttpSpec，无 requests/socket 访问权。
+
+v0.2.0：攻击流量走 `send_attack()` —— 打 context=attack 标记，并在**发包前**
+按目标向预算记账（计划书第 9 章"攻击请求 ≤50 条"强制点在唯一出口）。
 """
 from __future__ import annotations
 
@@ -11,6 +14,7 @@ import socket
 from urllib.parse import urlparse
 
 from webvuln.contracts.authz import EgressDenied
+from webvuln.contracts.budget import BudgetGuardContract
 from webvuln.contracts.transport import Transport
 from webvuln.db.database import Database
 from webvuln.models.schemas import HttpSpec, ResponseSnapshot
@@ -38,9 +42,11 @@ def is_restricted_ip(ip: str) -> bool:
 
 
 class EgressGateway:
-    def __init__(self, db: Database, transport: Transport):
+    def __init__(self, db: Database, transport: Transport,
+                 budget: BudgetGuardContract | None = None):
         self.db = db
         self.transport = transport
+        self.budget = budget
 
     @staticmethod
     def origin_of(url: str) -> str:
@@ -80,5 +86,19 @@ class EgressGateway:
         return row
 
     def send(self, spec: HttpSpec) -> ResponseSnapshot:
-        self.check(spec)  # 未授权目标零发包
+        """检测类出站请求（context=probe）。未授权目标零发包。"""
+        self.check(spec)
         return self.transport.send(spec)
+
+    def send_attack(self, spec: HttpSpec) -> ResponseSnapshot:
+        """模拟攻击出站请求（context=attack）。
+
+        顺序刻意如此：先做授权校验，再做预算记账，最后发包——
+        被授权拦下的请求不应消耗攻击预算，被预算拦下的请求一条都不许发出。
+        返回的是带标记的副本，调用方原始 spec 不被修改。
+        """
+        marked = spec.model_copy(update={"context": "attack"})
+        self.check(marked)
+        if self.budget is not None:
+            self.budget.charge_attack_request(self.origin_of(marked.url))
+        return self.transport.send(marked)

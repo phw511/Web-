@@ -70,13 +70,19 @@ class ApprovalKind(str, Enum):
 
 class HttpSpec(BaseModel):
     """一次出站 HTTP 请求的描述。检测/攻击模块只构造 HttpSpec，
-    实际发送只能经授权层 EgressGateway（唯一网络出口）。"""
+    实际发送只能经授权层 EgressGateway（唯一网络出口）。
+
+    context：流量来源标记。检测探测为 `probe`，模拟攻击为 `attack`
+    （由 EgressGateway.send_attack 打标，攻击函数不必自己关心），
+    供出口计数与证据分类使用（计划书 4.1 / 9 章）。
+    """
 
     method: str = "GET"
     url: str
     headers: dict[str, str] = Field(default_factory=dict)
     params: dict[str, str] = Field(default_factory=dict)
     data: Optional[str] = None
+    context: str = "probe"
 
 
 class ResponseSnapshot(BaseModel):
@@ -153,11 +159,14 @@ class AttackResult(BaseModel):
 class EvidenceRecord(BaseModel):
     id: str
     scan_id: str
-    kind: str          # scan_start/decision/approval/attack_request/attack_response/state_change/sign
+    kind: str          # scan_start/decision/approval/attack_request/attack_response/state_change/sign/budget_exceeded
     payload: dict[str, Any]
     prev_hash: str
     hash: str = ""
     created_at: str
+    # 运行身份（计划书 5.2）：默认空串表示"旧版记录"，哈希计算时该字段不入链，
+    # 保证升级后老证据链仍能通过 verify()。
+    app_version: str = ""
 
 
 class Conclusion(BaseModel):

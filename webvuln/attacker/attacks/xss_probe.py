@@ -3,6 +3,8 @@
 验证逻辑：对候选参数注入非执行型金丝雀（不含事件处理器/脚本），
 金丝雀字符串原样（尖括号未转义）出现在响应体即判定命中。
 全程只读 GET、不加载任何外部脚本，副作用可控、可机器断言。
+
+v0.2.0：出站改走 `gateway.send_attack()`。
 """
 from __future__ import annotations
 
@@ -32,7 +34,7 @@ class XSSReflectedProbe(AttackFunction):
             "params": {**base.params,
                        candidate.parameter: base.params.get(candidate.parameter, "") + REFLECT_PROBE}
         })
-        resp = gateway.send(spec)
+        resp = gateway.send_attack(spec)
         idx = resp.body.find(REFLECT_PROBE)
         matched = idx >= 0
         if matched:

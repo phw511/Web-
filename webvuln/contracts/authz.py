@@ -13,6 +13,14 @@ class AuthorizationError(Exception):
     pass
 
 
+class ApprovalForbidden(AuthorizationError):
+    """审批人角色不足（中危需 approver、高危需 signer）。
+
+    独立成子类，是为了让 Web 层把"角色不够"映射成 403、
+    把其他授权错误映射成 400——判定规则只有授权层一份，路由只做映射。
+    """
+
+
 class EgressDenied(Exception):
     """未授权/超范围/SSRF 拦截：任何出站请求被拦前不得发包。"""
 
@@ -45,3 +53,10 @@ class Authorizer(ABC):
 
     @abstractmethod
     def attack_approved(self, decision_id: str) -> bool: ...
+
+    @abstractmethod
+    def assert_approval_allowed(self, actor_role: str, risk_level: str) -> None:
+        """分级放行的唯一判定处：中危→approver、高危→signer（admin 兜底）。
+
+        违规抛 ApprovalForbidden。此前该规则写在 Web 路由里，CLI/内部调用可绕过。
+        """

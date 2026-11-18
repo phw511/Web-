@@ -2,8 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from webvuln.container import Container
-from webvuln.contracts.authz import AuthorizationError
-from webvuln.models.schemas import RiskLevel, Role
+from webvuln.contracts.authz import ApprovalForbidden, AuthorizationError
+from webvuln.models.schemas import RiskLevel
 from webvuln.web.deps import get_container, get_current_user
 
 router = APIRouter(prefix="/api/approvals", tags=["approvals"])
@@ -40,19 +40,17 @@ def pending(user: dict = Depends(get_current_user),
 def decide(body: DecisionIn,
            user: dict = Depends(get_current_user),
            c: Container = Depends(get_container)):
-    row = c.db.one("SELECT risk_level FROM decisions WHERE id=?",
-                   (body.decision_id,))
-    if row is None:
-        raise HTTPException(404, "决策不存在")
-    # 分级放行：中危需 approver，高危需 signer；reject 同样受角色约束
-    needed = Role.APPROVER if row["risk_level"] == RiskLevel.MEDIUM.value else Role.SIGNER
-    if user["role"] not in (Role.ADMIN.value, needed.value):
-        raise HTTPException(403, f"{row['risk_level']} 风险需 {needed.value} 角色审批")
     if body.action not in ("approve", "reject"):
         raise HTTPException(400, "action 必须为 approve/reject")
+    # 分级放行的判定规则只在授权层（authz.service）一份，路由只透传角色并映射异常：
+    # 角色不足 → 403；其他授权/业务错误 → 400。此前规则写在本文件里，CLI 可绕过。
     try:
-        con = c.pipeline.execute_approved(user["username"], body.decision_id,
-                                          body.action, body.reason)
+        con = c.pipeline.execute_approved(
+            user["username"], body.decision_id, body.action, body.reason,
+            actor_role=user["role"],
+        )
+    except ApprovalForbidden as e:
+        raise HTTPException(403, str(e))
     except (AuthorizationError, ValueError) as e:
         raise HTTPException(400, str(e))
     return con.model_dump()

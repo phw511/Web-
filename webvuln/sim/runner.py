@@ -3,6 +3,9 @@
 
 与真实扫描的唯一差异在底层 Transport：其余检测器、RuleAgent、Pipeline、
 授权、证据、报告逻辑全部复用真实实现，保证"模拟结果口径 = 真实口径"。
+
+v0.2.0：证据层写入 app_version（运行身份）；预算使用 NullBudget（模拟不设限，
+真实扫描的预算强制由 Container 注入 BudgetGuard 承担）。
 """
 from __future__ import annotations
 
@@ -13,6 +16,8 @@ from webvuln.attacker.attacks import *  # noqa: F401,F403  注册白名单攻击
 from webvuln.attacker.executor import AttackExecutor
 from webvuln.authz.egress import EgressGateway
 from webvuln.authz.service import AuthorizerService
+from webvuln.budget import NullBudget
+from webvuln.config import Settings
 from webvuln.contracts.attack import default_registry
 from webvuln.db.database import Database
 from webvuln.detector.engine import DetectorEngine
@@ -34,16 +39,18 @@ SIM_USER_APPROVE = "sim-approver"   # 双人审批：提交人与审批人分离
 def build_pipeline(db_path: str, evidence_dir: str) -> tuple[Pipeline, Database]:
     """以 MockTransport 组装一条与真实一致的流水线。"""
     db = Database(db_path)
-    evidence = FileEvidenceStore(evidence_dir, db)
+    evidence = FileEvidenceStore(evidence_dir, db,
+                                 app_version=Settings().app_version)
     transport = MockTransport()
-    gateway = EgressGateway(db, transport)
+    budget = NullBudget()
+    gateway = EgressGateway(db, transport, budget)
     authorizer = AuthorizerService(db)
     registry = default_registry()
     engine = DetectorEngine(gateway, [SQLiDetector(), XSSDetector()])
     agent = RuleAgent()
-    executor = AttackExecutor(registry, gateway, evidence)
-    reporter = ReporterService(db)
-    pipeline = Pipeline(db, authorizer, engine, agent, executor, evidence, registry)
+    executor = AttackExecutor(registry, gateway, evidence, budget)
+    pipeline = Pipeline(db, authorizer, engine, agent, executor, evidence,
+                        registry, budget)
     return pipeline, db
 
 
@@ -94,4 +101,5 @@ def run_simulation(out_dir: str, db_path: str | None = None) -> dict:
     return {
         "scan_id": scan_id, "target_id": reg.id,
         "metrics": result, "outputs": outputs,
+        "manifest": pipeline.evidence.manifest(),
     }
